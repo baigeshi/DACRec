@@ -1,8 +1,0 @@
-{
-    "dataloader": {
-        "max_num_segments": 0
-    },
-    "model": {
-        "temporal_dim": 0
-    }
-}
