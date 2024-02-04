@@ -1,5 +1,5 @@
 import torch
-
+import numpy as np
 from typing import (
     Any,
     List,
@@ -13,8 +13,16 @@ __all__ = (
 )
 
 
-METRIC_NAMES = ('HR', 'Recall', 'NDCG', 'MinSkew', 'MaxSkew', 'NDKL')
+METRIC_NAMES = ('HR', 'Recall', 'NDCG', 'APR')
 
+def KLD(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    epsilon = 1e-10
+    p = torch.clamp(p, min=epsilon, max=1-epsilon)
+    q = torch.clamp(q, min=epsilon, max=1-epsilon)
+    kl_div = p * torch.log(p / q)
+    kl_div = torch.where(torch.isnan(kl_div), torch.zeros_like(kl_div), kl_div)
+    kl_div = torch.clamp(kl_div, min=0)  # 将负值强制设置为0
+    return kl_div.sum()
 
 def calc_batch_rec_metrics_per_k(rankers: torch.LongTensor,
                                  labels: torch.LongTensor,
@@ -45,6 +53,7 @@ def calc_batch_rec_metrics_per_k(rankers: torch.LongTensor,
     device = labels.device
     ks = sorted(ks, reverse=True)
 
+    overall_popularity = labels.sum(0).float() / batch_size  # 计算整体流行度
     # for each k
     for k in ks:
         rankers_at_k = rankers[:, :k]
@@ -76,34 +85,11 @@ def calc_batch_rec_metrics_per_k(rankers: torch.LongTensor,
         metrics['values'][f'NDCG@{k}'] = ndcgs_list
         metrics['mean'][f'NDCG@{k}'] = sum(ndcgs_list) / batch_size
 
-        # MinSkew
-        hit_ranks = torch.arange(1, k + 1, device=device).float() * hit_per_pos
-        non_zero_hit_ranks = hit_ranks[hit_ranks != 0]
-        mean_hr = non_zero_hit_ranks.mean()
-        std_hr = non_zero_hit_ranks.std(unbiased=False)
-        skewness = ((non_zero_hit_ranks - mean_hr) / std_hr).pow(3) if std_hr > 0 else torch.zeros_like(non_zero_hit_ranks)
-        
-        min_skew = skewness.min().item() if len(skewness) > 0 else 0
-        metrics['values'][f'MinSkew@{k}'] = min_skew
-        metrics['mean'][f'MinSkew@{k}'] = min_skew / batch_size
-        
-        # MaxSkew
-        max_skew = skewness.max().item() if len(skewness) > 0 else 0
-        metrics['values'][f'MaxSkew@{k}'] = max_skew
-        metrics['mean'][f'MaxSkew@{k}'] = max_skew / batch_size
-
-        # NDKL
-        Z = sum([1 / np.log(i+1) for i in range(1, k+1)])
-        ndkl_values = []
-        for i in range(k):
-            p = labels[:, i]  
-            q = rankers[:, i]  
-            kl_div = p * (torch.log(p) - torch.log(q))  
-            ndkl_values.append(kl_div / np.log(i + 2))  
-        ndkl = sum(ndkl_values) / Z
-        ndkl_list = list(ndkl.detach().cpu().numpy())
-        metrics['values'][f'NDKL@{k}'] = ndkl_list
-        metrics['mean'][f'NDKL@{k}'] = sum(ndkl_list) / batch_size
+        # APR: Average Popularity of Recommended Items
+        recommended_popularity = labels.gather(1, rankers[:, :k]).sum(1).float() / k
+        apr_list = list(recommended_popularity.detach().cpu().numpy())
+        metrics['values'][f'APR@{k}'] = apr_list
+        metrics['mean'][f'APR@{k}'] = sum(apr_list) / batch_size
 
 
     return metrics
